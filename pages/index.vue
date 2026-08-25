@@ -167,6 +167,7 @@ export default {
   },
 
   async mounted() {
+	window.addEventListener("message", this._onPostMessage);
 	const apiUrl = (process.env.trellisApiUrl || "").replace(/\/$/, "");
 
 	const savedPreview = localStorage.getItem("trellis_preview_image");
@@ -244,6 +245,7 @@ export default {
   beforeDestroy() {
 	this._destroyed = true;
 	this._stopQueuePoll();
+	window.removeEventListener("message", this._onPostMessage);
 	if (this.modelUrl?.startsWith("blob:")) URL.revokeObjectURL(this.modelUrl);
 	window.clearTimeout(this.toastTimer);
   },
@@ -295,12 +297,6 @@ export default {
 	async generate() {
 	  if (!this.selectedFile || this.generating) return;
 
-	  const apiUrl = (process.env.trellisApiUrl || "").replace(/\/$/, "");
-	  if (!apiUrl) {
-		this.showToast(this.$t("image3d.apiNotConfigured"), "error");
-		return;
-	  }
-
 	  this.generating = true;
 	  this.generated = false;
 	  this.modelUrl = "";
@@ -311,44 +307,21 @@ export default {
 	  this._stopQueuePoll();
 	  if (this.randomizeSeed) this.seed = Math.floor(Math.random() * 4294967295).toString();
 
-	  try {
-		const response = await fetch(`${apiUrl}/generate`, {
-		  method: "POST",
-		  headers: { "Content-Type": "application/json" },
-		  body: JSON.stringify({
-			image: await this.fileToBase64(this.selectedFile),
-			seed: Number(this.seed) || 0,
-			pipeline_type: this.resolution === "512" ? "512" : `${this.resolution}_cascade`,
-			decimation_target: this.decimationTarget,
-			texture_size: this.texture,
-			ss_guidance_strength: this.advanced.sparseGuidance,
-			ss_guidance_rescale: this.advanced.sparseRescale,
-			ss_sampling_steps: this.advanced.sparseSteps,
-			ss_rescale_t: this.advanced.sparseT,
-			shape_slat_guidance_strength: this.advanced.shapeGuidance,
-			shape_slat_guidance_rescale: this.advanced.shapeRescale,
-			shape_slat_sampling_steps: this.advanced.shapeSteps,
-			shape_slat_rescale_t: this.advanced.shapeT,
-			tex_slat_guidance_strength: this.advanced.materialGuidance,
-			tex_slat_guidance_rescale: this.advanced.materialRescale,
-			tex_slat_sampling_steps: this.advanced.materialSteps,
-			tex_slat_rescale_t: this.advanced.materialT,
-		  }),
-		});
+	  const imageUrl = await this.fileToDataUrl(this.selectedFile);
+	  window.parent.postMessage({ type: "generate", payload: { imageUrl } }, "*");
+	},
 
-		const jobResult = await response.json();
-		if (!response.ok) throw new Error(jobResult.detail || "Job creation failed");
-
-		this.jobId = jobResult.job_id;
-		this.jobMessage = "Job queued";
-		localStorage.setItem("trellis_active_job_id", this.jobId);
-
-		await this.pollJobStatus(apiUrl);
-	  } catch (error) {
-		this.showToast(error.message || this.$t("image3d.generationFailed"), "error");
-		this.generating = false;
-		localStorage.removeItem("trellis_active_job_id");
-		this._startQueuePoll();
+	_onPostMessage(event) {
+	  if (!event.data || typeof event.data !== "object") return;
+	  const { type, payload } = event.data;
+	  if (type === "3dModelGenerated" && payload?.modelUrl) {
+		if (this.modelUrl?.startsWith("blob:")) URL.revokeObjectURL(this.modelUrl);
+		this.modelUrl = payload.modelUrl;
+		this.generated = true;
+		this.jobProgress = 100;
+		this._resetGeneratingState();
+		localStorage.setItem("trellis_last_glb_url", payload.modelUrl);
+		localStorage.removeItem("trellis_preview_image");
 	  }
 	},
 
@@ -485,10 +458,10 @@ export default {
 	  }, 5000);
 	},
 
-	fileToBase64(file) {
+	fileToDataUrl(file) {
 	  return new Promise((resolve, reject) => {
 		const reader = new FileReader();
-		reader.onload = () => resolve(reader.result.split(",")[1]);
+		reader.onload = () => resolve(reader.result);
 		reader.onerror = () => reject(new Error(this.$t("image3d.imageReadFailed")));
 		reader.readAsDataURL(file);
 	  });
