@@ -80,6 +80,9 @@ import AppHeader from "~/components/AppHeader.vue";
 import AdvancedModal from "~/components/AdvancedModal.vue";
 import ControlPanel from "~/components/ControlPanel.vue";
 import PreviewPanel from "~/components/PreviewPanel.vue";
+import { Mode, resolveEmbedConfig } from "~/lib/embed-config.js";
+import { HostBridge, Incoming } from "~/lib/host-bridge.js";
+import { GenerationStatus, SynodeApi } from "~/lib/synode-api.js";
 
 export default {
   name: "ImageTo3DPage",
@@ -92,6 +95,7 @@ export default {
 	  selectedFile: null,
 	  generating: false,
 	  generated: false,
+	  mode: Mode.Embed,
 	  jobId: null,
 	  jobProgress: 0,
 	  jobMessage: "",
@@ -164,10 +168,22 @@ export default {
   created() {
 	this._destroyed = false;
 	this._queuePollInterval = null;
+	this._requestId = null;
+	this._api = null;
+
+	this._bridge = new HostBridge();
+	this._config = resolveEmbedConfig(this.$route.query, this._bridge.embedded);
+	this.mode = this._config.mode;
   },
 
   async mounted() {
-	window.addEventListener("message", this._onPostMessage);
+	this._bridge
+	  .on(Incoming.Generated, this.onHostGenerated)
+	  .on(Incoming.Progress, this.onHostProgress)
+	  .on(Incoming.Failed, this.onHostFailed);
+	this._bridge.start();
+	this._bridge.ready(this.$i18n.locale);
+
 	const apiUrl = (process.env.trellisApiUrl || "").replace(/\/$/, "");
 
 	const savedPreview = localStorage.getItem("trellis_preview_image");
@@ -245,7 +261,7 @@ export default {
   beforeDestroy() {
 	this._destroyed = true;
 	this._stopQueuePoll();
-	window.removeEventListener("message", this._onPostMessage);
+	this._bridge.stop();
 	if (this.modelUrl?.startsWith("blob:")) URL.revokeObjectURL(this.modelUrl);
 	window.clearTimeout(this.toastTimer);
   },
@@ -307,22 +323,133 @@ export default {
 	  this._stopQueuePoll();
 	  if (this.randomizeSeed) this.seed = Math.floor(Math.random() * 4294967295).toString();
 
+	  if (this.mode === Mode.Token) {
+		await this.generateViaApi();
+		return;
+	  }
+
+	  if (!this._bridge.embedded) {
+		this.showToast(this.$t("image3d.noHostPage"), "error");
+		this._resetGeneratingState();
+		return;
+	  }
+
 	  const imageUrl = await this.fileToDataUrl(this.selectedFile);
-	  window.parent.postMessage({ type: "generate", payload: { imageUrl } }, "*");
+	  this._requestId = this._bridge.requestGeneration({
+		imageUrl,
+		fileName: this.selectedFile.name,
+		mimeType: this.selectedFile.type,
+	  });
 	},
 
-	_onPostMessage(event) {
-	  if (!event.data || typeof event.data !== "object") return;
-	  const { type, payload } = event.data;
-	  if (type === "3dModelGenerated" && payload?.modelUrl) {
-		if (this.modelUrl?.startsWith("blob:")) URL.revokeObjectURL(this.modelUrl);
-		this.modelUrl = payload.modelUrl;
-		this.generated = true;
-		this.jobProgress = 100;
+	/**
+	 * `token` mode: upload the image, queue the job and poll it ourselves using
+	 * the JWT pair exchanged from the organization embed token.
+	 */
+	async generateViaApi() {
+	  const file = this.selectedFile;
+
+	  try {
+		const api = await this.ensureApi();
+		const extension = (file.type.split("/")[1] || "png").replace("jpeg", "jpg");
+		const name = `trellis-sources/${Date.now()}.${extension}`;
+
+		this.jobMessage = this.$t("image3d.uploadingImage");
+		const imageUrl = await api.uploadImage(file, name);
+
+		this.jobMessage = this.$t("image3d.queueingJob");
+		const generation = await api.generate(imageUrl, this.$t("image3d.generatedAssetName"));
+
+		if (!generation?._id) {
+		  throw new Error(this.$t("image3d.generationFailed"));
+		}
+
+		this.jobId = generation._id;
+		this.jobProgress = 10;
+		localStorage.setItem("trellis_active_job_id", generation._id);
+
+		const completed = await api.pollGeneration(generation._id, {
+		  isAborted: () => this._destroyed || this.jobId !== generation._id,
+		  onProgress: (doc) => {
+			this.jobProgress = doc?.status === GenerationStatus.Processing ? 50 : 10;
+			this.jobMessage = this.$t(`image3d.status.${doc?.status || "pending"}`);
+		  },
+		});
+
+		if (completed) this.applyGeneratedModel(completed.modelUrl);
+	  } catch (error) {
+		if (this._destroyed) return;
+		this.showToast(error?.message || this.$t("image3d.generationFailed"), "error");
 		this._resetGeneratingState();
-		localStorage.setItem("trellis_last_glb_url", payload.modelUrl);
-		localStorage.removeItem("trellis_preview_image");
 	  }
+	},
+
+	/**
+	 * Lazily builds the API client. The embed token comes either from the URL
+	 * or, preferably, from the host page so it never lands in browser history.
+	 */
+	async ensureApi() {
+	  if (this._api) return this._api;
+
+	  let { embedToken, scope } = this._config;
+
+	  if (!embedToken && this._bridge.embedded) {
+		const fromHost = await this._bridge.requestEmbedToken();
+		embedToken = fromHost.token || "";
+		scope = fromHost.scope || scope;
+	  }
+
+	  if (!embedToken) {
+		throw new Error(this.$t("image3d.missingEmbedToken"));
+	  }
+
+	  this._api = new SynodeApi({ embedToken, scope });
+	  return this._api;
+	},
+
+	/**
+	 * @param {string} modelUrl URL of the generated .glb
+	 */
+	applyGeneratedModel(modelUrl) {
+	  if (!modelUrl) return;
+	  if (this.modelUrl?.startsWith("blob:")) URL.revokeObjectURL(this.modelUrl);
+	  this.modelUrl = modelUrl;
+	  this.generated = true;
+	  this.jobProgress = 100;
+	  this._resetGeneratingState();
+	  localStorage.setItem("trellis_last_glb_url", modelUrl);
+	  localStorage.removeItem("trellis_preview_image");
+	},
+
+	/**
+	 * Answers sent before the current request started, or belonging to a
+	 * superseded one, must not overwrite the preview.
+	 * @param {object} payload
+	 */
+	_matchesRequest(payload) {
+	  // Hosts speaking protocol v1 do not echo a requestId.
+	  if (!payload?.requestId || !this._requestId) return true;
+	  return payload.requestId === this._requestId;
+	},
+
+	onHostGenerated(payload) {
+	  if (!payload?.modelUrl || !this._matchesRequest(payload)) return;
+	  this._requestId = null;
+	  this.applyGeneratedModel(payload.modelUrl);
+	},
+
+	onHostProgress(payload) {
+	  if (!this.generating || !this._matchesRequest(payload)) return;
+	  if (typeof payload.progress === "number") this.jobProgress = payload.progress;
+	  if (payload.status) this.jobMessage = this.$t(`image3d.status.${payload.status}`);
+	  if (payload.message) this.jobMessage = payload.message;
+	},
+
+	onHostFailed(payload) {
+	  if (!this._matchesRequest(payload)) return;
+	  this._requestId = null;
+	  this.showToast(payload.errorMessage || this.$t("image3d.generationFailed"), "error");
+	  this._resetGeneratingState();
 	},
 
 	async pollJobStatus(apiUrl) {

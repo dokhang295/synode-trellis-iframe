@@ -2,7 +2,16 @@ export default {
 	ssr: false,
 	target: "server",
 	env: {
-		trellisApiUrl: "/trellis-api"
+		// Self-hosted TRELLIS.2 server, used to resume standalone jobs.
+		trellisApiUrl: "/trellis-api",
+		// Synode API root. Services hang off it as `/{service}`; on localhost
+		// each one is reached on its own development port instead.
+		synodeApiUrl: process.env.SYNODE_API_URL || "http://localhost",
+		// Tenant scope sent with every message when the URL does not carry one.
+		synodeScope: process.env.SYNODE_SCOPE || "",
+		// Comma separated origins allowed to host this app. Leave empty in local
+		// development only — it disables the postMessage origin checks.
+		allowedParentOrigins: process.env.ALLOWED_PARENT_ORIGINS || ""
 	},
 	head: {
 		title: "Image to 3D | Synode",

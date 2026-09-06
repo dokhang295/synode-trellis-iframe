@@ -1,7 +1,11 @@
+import { allowedParentOrigins } from "~/lib/host-bridge.js";
+
 const SUPPORTED_LOCALES = ["en", "fr"];
 
 export default ({ app, route }) =>
 {
+	const allowed = allowedParentOrigins();
+
 	const setLocale = (locale) =>
 	{
 		if (SUPPORTED_LOCALES.includes(locale)) app.i18n.setLocale(locale);
@@ -9,14 +13,16 @@ export default ({ app, route }) =>
 
 	setLocale(route.query.locale || route.query.lang);
 
-	window.addEventListener("message", ({ data }) =>
+	// The ready handshake is sent by the page once it mounts, so the host knows
+	// the protocol version along with the locale.
+	window.addEventListener("message", (event) =>
 	{
-		if (!data || data.type !== "synode:locale") return;
-		setLocale(data.locale);
-	});
+		if (event.source !== window.parent) return;
+		if (allowed.length && !allowed.includes(event.origin)) return;
 
-	if (window.parent !== window)
-	{
-		window.parent.postMessage({ type: "synode:iframe-ready", locale: app.i18n.locale }, "*");
-	}
+		const { data } = event;
+		if (!data || data.type !== "synode:locale") return;
+
+		setLocale(data.locale ?? data.payload?.locale);
+	});
 };

@@ -28,6 +28,17 @@ export default {
         networkError: "Connexion perdue — impossible de joindre le serveur après plusieurs tentatives.",
         reconnecting: "Connexion perdue — nouvelle tentative ({attempt}/{max})…",
         restartFailed: "Le serveur a redémarré et votre job a été annulé. Veuillez générer à nouveau.",
+        uploadingImage: "Envoi de l'image source…",
+        queueingJob: "Mise en file de la génération…",
+        generatedAssetName: "Modèle 3D généré",
+        missingEmbedToken: "Aucun jeton d'intégration disponible — cette application ne peut pas joindre l'API.",
+        noHostPage: "Cette application doit être intégrée dans une page hôte pour générer un modèle.",
+        status: {
+            pending: "En file d'attente…",
+            processing: "Génération…",
+            completed: "Terminé",
+            failed: "Échec"
+        },
         preview: "Aperçu 3D",
         extract: "Extraire le GLB",
         export: "Exporter",

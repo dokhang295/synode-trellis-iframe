@@ -28,6 +28,17 @@ export default {
 		imageReadFailed: "The selected image could not be read.",
 		generatedSuccess: "3D model generated in {seconds}s.",
 		restartFailed: "The server restarted and your job was cancelled. Please generate again.",
+		uploadingImage: "Uploading the source image…",
+		queueingJob: "Queueing the generation…",
+		generatedAssetName: "Generated 3D model",
+		missingEmbedToken: "No embed token available — this app cannot reach the API.",
+		noHostPage: "This app must be embedded in a host page to generate a model.",
+		status: {
+			pending: "Queued…",
+			processing: "Generating…",
+			completed: "Completed",
+			failed: "Failed"
+		},
         preview: "3D Preview",
         extract: "Extract GLB",
         export: "Export",
